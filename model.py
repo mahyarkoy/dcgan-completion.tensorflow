@@ -21,7 +21,7 @@ SUPPORTED_EXTENSIONS = ["png", "jpg", "jpeg"]
 def dataset_files(root):
     """Returns a list of all image files in the given directory"""
     return list(itertools.chain.from_iterable(
-        glob(os.path.join(root, "*.{}".format(ext))) for ext in SUPPORTED_EXTENSIONS))
+        glob(os.path.join(root, "*/*.{}".format(ext))) for ext in SUPPORTED_EXTENSIONS))
 
 
 class DCGAN(object):
@@ -81,6 +81,118 @@ class DCGAN(object):
         self.build_model()
 
         self.model_name = "DCGAN.model"
+
+    def generator_1(self, z, s, sents):
+        with tf.variable_scope('GEN1') as vscope:
+            ### sentence embedding char CNN RNN: get sf
+            sh = char_cnn_rnn(s, sents, self.sent_hidden_size)
+            ### concat sent_hidden and z along channels (axis=1), reshape to image looks
+            concat = tf.reshape(tf.concat([z,sh], 1), [-1, 1, 1, tf.shape(concat)[1]])
+            ### upsample and conv3
+            level = 1
+            depth_mul = 8
+            size = 8
+            while size < self.image_size:
+                tf.image.resize_nearest_neighbor(z, [size, size])
+    
+            # TODO: Nicer iteration pattern here. #readability
+            hs = [None]
+            hs[0] = tf.reshape(self.z_, [-1, 4, 4, self.gf_dim * 8])
+            hs[0] = tf.nn.relu(self.g_bns[0](hs[0], self.is_training))
+
+            #i = 1 # Iteration number.
+            #depth_mul = 8  # Depth decreases as spatial component increases.
+            #size = 8  # Size increases as depth decreases.
+
+            while size < self.image_size:
+                hs.append(None)
+                name = 'g_h{}'.format(i)
+                hs[i], _, _ = conv2d_transpose(hs[i-1],
+                    [self.batch_size, size, size, self.gf_dim*depth_mul], name=name, with_w=True)
+                hs[i] = tf.nn.relu(self.g_bns[i](hs[i], self.is_training))
+
+                i += 1
+                depth_mul //= 2
+                size *= 2
+
+            hs.append(None)
+            name = 'g_h{}'.format(i)
+            hs[i], _, _ = conv2d_transpose(hs[i - 1],
+                [self.batch_size, size, size, 3], name=name, with_w=True)
+    
+            return tf.nn.tanh(hs[i])
+              
+    def build_model_koy(self):
+        ### Init placeholders
+        self.images = tf.placeholder(tf.float32, [None] + self.image_shape, name='real_images')
+        self.images_high = tf.placeholder(tf.float32, [None] + self.image_shape_high, name='real_images_high')
+        self.sents = tf.placeholder(tf.float32, [None] + self.sent_shape, name='real_sents')
+
+        ### 1st GAN
+        with tf.variable_scope('GAN1') as vscope:
+            ## input placeholeders: is_training(batchnorm updates), z(random img) and s(random txt)
+            self.is_training_g1 = tf.placeholder(tf.bool, name='is_training')
+            self.z1 = tf.placeholder(tf.float32, [None, self.z_dim], name='z')
+            self.s1 = tf.placeholder(tf.float32, [None, self.s_dim], name='s')
+            ## 1st generator
+            self.G1 = self.generator_1(self.z1, self.s1, self.sents)
+            ## 1st real and fake discriminators
+            self.d1, self.d1_logits = self.discriminator_1(self.images, self.sents)
+            self.d1_, self.d1_logits_ = self.discriminator_1(self.G1, self.sents, reuse=True)
+            ## losses
+            self.g1_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.D1_logits_,labels=tf.ones_like(self.D1_)))
+            self.d1_loss_real = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.D1_logits,labels=tf.ones_like(self.D1)))
+            self.d1_loss_fake = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.D1_logits_,labels=tf.zeros_like(self.D1_)))
+            self.d1_loss = self.d1_loss_real + self.d1_loss_fake
+            ## summaries
+            self.d1_sum = tf.summary.histogram("d1", self.d1)
+            self.d1__sum = tf.summary.histogram("d1_", self.d1_)
+            self.G1_sum = tf.summary.image("G1", self.G1)
+            self.d1_loss_real_sum = tf.summary.scalar("d1_loss_real", self.d1_loss_real)
+            self.d1_loss_fake_sum = tf.summary.scalar("d1_loss_fake", self.d1_loss_fake)
+            self.d1_loss_sum = tf.summary.scalar("d1_loss", self.d1_loss)
+            self.g1_loss_sum = tf.summary.scalar("g1_loss", self.g1_loss)
+
+        ### 2nd GAN
+        with tf.variable_scope('GAN2') as vscope:
+            ## input placeholeders: is_training(batchnorm updates) and s(random txt)
+            self.is_training_g2 = tf.placeholder(tf.bool, name='is_training')
+            self.s2 = tf.placeholder(tf.float32, [None, self.s_dim], name='s')
+            ## 2nd generator: receive first generator output G1 as input
+            self.G2 = self.generator_2(self.G1, self.s2, self.sents)
+            ## 2nd real and fake discriminators
+            self.d2, self.d2_logits = self.discriminator_2(self.images_high, self.sents)
+            self.d2_, self.d2_logits_ = self.discriminator_2(self.G2, self.sents, reuse=True)
+            ## losses 2
+            self.g2_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.D2_logits_,labels=tf.ones_like(self.D2_)))
+            self.d2_loss_real = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.D2_logits,labels=tf.ones_like(self.D2)))
+            self.d2_loss_fake = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.D2_logits_,labels=tf.zeros_like(self.D2_)))
+            self.d2_loss = self.d2_loss_real + self.d2_loss_fake
+            ## summaries
+            self.d2_sum = tf.summary.histogram("d2", self.d2)
+            self.d2__sum = tf.summary.histogram("d2_", self.d2_)
+            self.G2_sum = tf.summary.image("G2", self.G2)
+            self.d2_loss_real_sum = tf.summary.scalar("d2_loss_real", self.d2_loss_real)
+            self.d2_loss_fake_sum = tf.summary.scalar("d2_loss_fake", self.d2_loss_fake)
+            self.d2_loss_sum = tf.summary.scalar("d2_loss", self.d2_loss)
+            self.g2_loss_sum = tf.summary.scalar("g2_loss", self.g2_loss)
+
+        ### Store variables names and saver
+        for var in tf.trainable_variables():
+            if 'DIS1' in var.name:
+                self.d1_vars.append(var)
+            elif 'GEN1' in var.name:
+                self.g1_vars.append(var)
+            elif 'DIS2' in var.name:
+                self.d2_vars.append(var)
+            elif 'GEN2' in var.name:
+                self.g2_vars.append(var)
+        
+        self.saver = tf.train.Saver(max_to_keep=1)
+
+
+
+
 
     def build_model(self):
         self.is_training = tf.placeholder(tf.bool, name='is_training')
@@ -195,15 +307,20 @@ Initializing a new one.
 """)
 
         for epoch in xrange(config.epoch):
-            data = dataset_files(config.dataset)
+            ### already loaded but needs shuffling
+            # data = dataset_files(config.dataset)
+            print '>>> DATA LEN: ', len(data)
+            np.random.shuffle(data)
             batch_idxs = min(len(data), config.train_size) // self.batch_size
 
             for idx in xrange(0, batch_idxs):
+                ### read batch_size images from batch_files
                 batch_files = data[idx*config.batch_size:(idx+1)*config.batch_size]
                 batch = [get_image(batch_file, self.image_size, is_crop=self.is_crop)
                          for batch_file in batch_files]
                 batch_images = np.array(batch).astype(np.float32)
 
+                ### generate batch_size random z inputs
                 batch_z = np.random.uniform(-1, 1, [config.batch_size, self.z_dim]) \
                             .astype(np.float32)
 

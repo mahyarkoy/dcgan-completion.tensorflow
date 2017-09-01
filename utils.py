@@ -13,6 +13,7 @@ import pprint
 import scipy.misc
 import numpy as np
 from time import gmtime, strftime
+import cv2
 
 pp = pprint.PrettyPrinter()
 
@@ -58,8 +59,25 @@ def transform(image, npx=64, is_crop=True):
     if is_crop:
         cropped_image = center_crop(image, npx)
     else:
-        cropped_image = image
+        cropped_image = resize_crop_image(image, npx)
     return np.array(cropped_image)/127.5 - 1.
+
+def resize_crop_image(img, output_side_length = 256):
+        ### Takes an image, resize it and crop the center square
+        height, width, depth = img.shape
+        new_height = output_side_length
+        new_width = output_side_length
+        if height > width:
+            new_height = output_side_length * height // width
+        else:
+            new_width = output_side_length * width // height
+        resized_img = cv2.resize(img, (new_width, new_height))
+        height_offset = (new_height - output_side_length) // 2
+        width_offset = (new_width - output_side_length) // 2
+        cropped_img = resized_img[height_offset:height_offset + output_side_length,
+                                  width_offset:width_offset + output_side_length]
+        # cropped_img = resized_img
+        return cropped_img
 
 def inverse_transform(images):
     return (images+1.)/2.

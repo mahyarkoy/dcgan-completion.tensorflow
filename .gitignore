@@ -1,6 +1,6 @@
 logs
-samples
-checkpoint
+samples*
 data
 __pycache__
 out
+*.pyc
